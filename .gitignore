@@ -1,0 +1,26 @@
+# 虚拟环境
+.venv/
+__pycache__/
+*.pyc
+
+# 数据文件
+data/chroma/
+data/uploads/
+data/doc_registry.json
+
+# 环境变量（含 API Key）
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Docker 构建缓存
+*.tar.gz
+
+# PyTorch wheel 文件
+*.whl

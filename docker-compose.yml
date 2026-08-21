@@ -1,0 +1,44 @@
+version: "3.8"
+
+services:
+  # FastAPI 后端
+  api:
+    build: .
+    container_name: rag-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - EMBEDDING_DEVICE=cpu
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1200M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Streamlit 前端
+  frontend:
+    build: .
+    container_name: rag-frontend
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      - EMBEDDING_DEVICE=cpu
+    command: ["streamlit", "run", "frontend/app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
+    depends_on:
+      - api
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 400M
