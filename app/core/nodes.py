@@ -1,11 +1,33 @@
 """LangGraph 状态图节点实现"""
 
 from loguru import logger
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 
 from app.core.state import RAGState
 from app.core.retrieval import hybrid_retriever
 from app.vectorstore.chroma import vector_store
+
+
+def _estimate_tokens(text: str) -> int:
+    """粗略估算 token 数（中文约 1.5 字符/token）"""
+    return max(1, len(text) // 2)
+
+
+def _trim_history_by_tokens(messages: list[BaseMessage], max_tokens: int) -> list[BaseMessage]:
+    """按 token 预算从旧到新截断对话历史"""
+    total = 0
+    keep_from = len(messages)
+    # 从最新消息往回累加，超出预算就截断最早的
+    for i in range(len(messages) - 1, -1, -1):
+        msg_tokens = _estimate_tokens(messages[i].content)
+        if total + msg_tokens > max_tokens:
+            break
+        total += msg_tokens
+        keep_from = i
+    trimmed = messages[keep_from:]
+    if len(trimmed) < len(messages):
+        logger.info(f"对话历史截断: {len(messages)} → {len(trimmed)} 条 (估算 {total} tokens)")
+    return trimmed
 
 
 _llm_instance = None
@@ -138,6 +160,8 @@ def generate_answer(state: RAGState) -> dict:
 
     根据检索到的文档和对话历史生成回答。
     """
+    from app.config import settings
+
     question = state.get("rewritten_query") or state["question"]
     docs = state.get("retrieved_docs", [])
     messages = state.get("messages", [])
@@ -147,10 +171,9 @@ def generate_answer(state: RAGState) -> dict:
         [f"[来源: {d['metadata'].get('source', '未知')}] {d['content']}" for d in docs]
     )
 
-    # 构建对话历史
-    history = []
-    for msg in messages[-6:]:
-        history.append(msg)
+    # 按 token 预算截断对话历史（排除最后一条当前问题）
+    history_msgs = messages[:-1] if messages else []
+    history = _trim_history_by_tokens(history_msgs, settings.max_history_tokens)
 
     prompt = [
         SystemMessage(

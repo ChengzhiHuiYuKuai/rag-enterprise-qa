@@ -13,11 +13,33 @@ from loguru import logger
 
 from app.models.chat import ChatRequest, ChatResponse
 from app.core.graph import rag_graph
+from app.config import settings
 
 router = APIRouter(prefix="/chat", tags=["对话"])
 
 # 会话内存存储（生产环境建议用 Redis）
 _sessions: dict[str, list] = {}
+
+# 存储历史的 token 预算（留余量，实际发给 LLM 的由 nodes.py 再截一次）
+_STORE_TOKEN_BUDGET = settings.max_history_tokens * 2
+
+
+def _estimate_tokens(text: str) -> int:
+    """粗略估算 token 数"""
+    return max(1, len(text) // 2)
+
+
+def _trim_session_history(messages: list, max_tokens: int) -> list:
+    """按 token 预算截断会话存储的历史（从旧到新保留）"""
+    total = 0
+    keep_from = len(messages)
+    for i in range(len(messages) - 1, -1, -1):
+        msg_tokens = _estimate_tokens(messages[i].content)
+        if total + msg_tokens > max_tokens:
+            break
+        total += msg_tokens
+        keep_from = i
+    return messages[keep_from:]
 
 
 def _sse_event(event: str, data: dict) -> str:
@@ -59,10 +81,10 @@ async def chat(request: ChatRequest):
     # 非流式：直接执行图
     result = await rag_graph.ainvoke(initial_state)
 
-    # 更新会话历史
+    # 更新会话历史（按 token 预算截断）
     history.append(HumanMessage(content=request.question))
     history.append(AIMessage(content=result["answer"]))
-    _sessions[session_id] = history[-20:]  # 保留最近 10 轮
+    _sessions[session_id] = _trim_session_history(history, _STORE_TOKEN_BUDGET)
 
     return ChatResponse(
         answer=result["answer"],
@@ -112,11 +134,11 @@ async def _stream_response(initial_state: dict, session_id: str):
                 sources = output.get("sources", [])
                 yield _sse_event("sources", {"sources": sources})
 
-        # 更新会话历史
+        # 更新会话历史（按 token 预算截断）
         history = _sessions.get(session_id, [])
         history.append(HumanMessage(content=initial_state["question"]))
         history.append(AIMessage(content=full_answer))
-        _sessions[session_id] = history[-20:]
+        _sessions[session_id] = _trim_session_history(history, _STORE_TOKEN_BUDGET)
 
         yield _sse_event("done", {"session_id": session_id})
 
