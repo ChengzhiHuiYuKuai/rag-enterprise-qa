@@ -35,7 +35,7 @@
 | 查询改写 | ⏸️ 已禁用 | 为提速暂时去掉了，后续可加回 |
 | 相关性判断 | ⏸️ 已禁用 | 同上 |
 | 文档元数据持久化 | ✅ 已完成 | `_doc_registry` 持久化到 `data/doc_registry.json` |
-| 对话历史 token 截断 | ⏸️ 未实现 | 当前按消息数截断（20条），`max_history_tokens` 配置未使用 |
+| 对话历史 token 截断 | ✅ 已完成 | 按 `max_history_tokens`（默认2000）截断，防止 token 消耗二次方增长 |
 
 ---
 
@@ -58,6 +58,9 @@ HF_ENDPOINT=https://hf-mirror.com
 TOP_K=5
 BM25_WEIGHT=0.3
 VECTOR_WEIGHT=0.7
+
+# 对话历史（token 预算截断）
+MAX_HISTORY_TOKENS=2000
 ```
 
 ### 环境信息
