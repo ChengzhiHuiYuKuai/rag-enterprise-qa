@@ -3,12 +3,13 @@
 支持普通响应和 SSE 流式响应（token 级真正的流式输出）。
 """
 
+import asyncio
 import json
 from uuid import uuid4
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from loguru import logger
 
 from app.models.chat import ChatRequest, ChatResponse
@@ -45,6 +46,65 @@ def _trim_session_history(messages: list, max_tokens: int) -> list:
 def _sse_event(event: str, data: dict) -> str:
     """格式化 SSE 事件"""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+# 保留最近几轮不压缩，只压缩更早的历史
+_KEEP_RECENT_TURNS = 2
+
+
+def _turn_count(messages: list) -> int:
+    """计算对话轮数"""
+    return sum(1 for m in messages if isinstance(m, HumanMessage))
+
+
+async def _summarize_and_compact(session_id: str) -> None:
+    """异步摘要压缩：当对话轮数超过阈值时，用 LLM 压缩早期历史"""
+    from app.core.nodes import get_llm
+
+    messages = _sessions.get(session_id, [])
+    turns = _turn_count(messages)
+
+    if turns < settings.summary_threshold:
+        return
+
+    # 保留最近 _KEEP_RECENT_TURNS 轮（每轮 = Human + AI），其余压缩
+    keep_count = _KEEP_RECENT_TURNS * 2
+    to_summarize = messages[:-keep_count]
+    to_keep = messages[-keep_count:]
+
+    if len(to_summarize) < 4:  # 太少不值得压缩
+        return
+
+    # 构建摘要请求
+    history_text = ""
+    for msg in to_summarize:
+        if isinstance(msg, HumanMessage):
+            history_text += f"用户: {msg.content}\n"
+        elif isinstance(msg, AIMessage):
+            history_text += f"助手: {msg.content}\n"
+        elif isinstance(msg, SystemMessage):
+            history_text += f"[摘要] {msg.content}\n"
+
+    llm = get_llm()
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(
+                content="你是一个对话摘要助手。将以下对话历史压缩为一段简洁的摘要，"
+                "保留关键信息（用户的核心问题、重要结论、提到的具体内容）。"
+                "摘要控制在200字以内，用第三人称叙述。"
+            ),
+            HumanMessage(content=f"对话历史:\n{history_text}\n\n请生成摘要:"),
+        ])
+        summary = response.content.strip()
+
+        # 用摘要替换早期历史
+        new_messages = [SystemMessage(content=f"[对话摘要] {summary}")] + to_keep
+        _sessions[session_id] = new_messages
+        logger.info(
+            f"会话 {session_id} 摘要压缩: {len(messages)} 条 → {len(new_messages)} 条"
+        )
+    except Exception as e:
+        logger.warning(f"摘要压缩失败（不影响正常使用）: {e}")
 
 
 @router.post("", response_model=ChatResponse)
@@ -85,6 +145,9 @@ async def chat(request: ChatRequest):
     history.append(HumanMessage(content=request.question))
     history.append(AIMessage(content=result["answer"]))
     _sessions[session_id] = _trim_session_history(history, _STORE_TOKEN_BUDGET)
+
+    # 异步触发摘要压缩（不阻塞响应）
+    asyncio.create_task(_summarize_and_compact(session_id))
 
     return ChatResponse(
         answer=result["answer"],
@@ -139,6 +202,9 @@ async def _stream_response(initial_state: dict, session_id: str):
         history.append(HumanMessage(content=initial_state["question"]))
         history.append(AIMessage(content=full_answer))
         _sessions[session_id] = _trim_session_history(history, _STORE_TOKEN_BUDGET)
+
+        # 异步触发摘要压缩（不阻塞响应）
+        asyncio.create_task(_summarize_and_compact(session_id))
 
         yield _sse_event("done", {"session_id": session_id})
 
